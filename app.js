@@ -22,12 +22,16 @@ const MONTH_ORDER = {
 };
 
 const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
+const FETCH_TIMEOUT_MS = Math.max(4000, Number(window.DARUS_DASHBOARD_CONFIG?.timeoutMs || 12000));
+const FETCH_RETRIES = Math.max(0, Number(window.DARUS_DASHBOARD_CONFIG?.retryCount ?? 1));
+const FETCH_RETRY_DELAY_MS = Math.max(300, Number(window.DARUS_DASHBOARD_CONFIG?.retryDelayMs || 700));
 const DEFAULT_ATTENDANCE_START_MINUTES = 7 * 60;
 const DEFAULT_ATTENDANCE_END_MINUTES = 17 * 60;
 const numberFormat = new Intl.NumberFormat("id-ID", { maximumFractionDigits: 1 });
 const percentFormat = new Intl.NumberFormat("id-ID", { maximumFractionDigits: 0 });
 let filtersBound = false;
 let currentDashboardModel = null;
+let loadRequestId = 0;
 
 function normalizeText(value, fallback = "-") {
   const text = String(value ?? "").trim();
@@ -74,6 +78,19 @@ function formatDateLabel(dateKey) {
   return `${match[3]}/${match[2]}/${match[1]}`;
 }
 
+function formatDateTimeLabel(value) {
+  if (!value) return "-";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return new Intl.DateTimeFormat("id-ID", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(parsed);
+}
+
 function formatNumber(value, digits = 1) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
   const parsed = Number(value);
@@ -96,6 +113,12 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function wait(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function uniqueBy(items, keySelector) {
   const map = new Map();
   for (const item of items) {
@@ -110,6 +133,22 @@ function getPersonKey(row) {
   const name = normalizeText(row.name || row.Nama || row.nama || "", "");
   const division = normalizeText(row.division || row.Divisi || row.divisi || "", "");
   return phone || [normalizeKey(name), normalizeKey(division)].filter(Boolean).join("|");
+}
+
+function resolveRowIdentity(row) {
+  return {
+    personKey: getPersonKey(row),
+    phone: normalizeText(row.phone || row["Nomer HP"] || row["Nomor HP"] || row.nomor_hp || "", ""),
+    userId: normalizeText(row.userId || row["User ID"] || row.user_id || "", ""),
+  };
+}
+
+function findDirectoryMember(identity, directoryLookup) {
+  if (!directoryLookup) return null;
+  return (identity.personKey ? directoryLookup.byKey.get(identity.personKey) : null) ||
+    (identity.phone ? directoryLookup.byPhone.get(identity.phone) : null) ||
+    (identity.userId ? directoryLookup.byUserId.get(identity.userId) : null) ||
+    null;
 }
 
 function isEmployee(row) {
@@ -486,15 +525,17 @@ function normalizeDirectoryRows(rows) {
   );
 }
 
-function normalizeScoreRows(rows, employeeMap) {
+function normalizeScoreRows(rows, directoryLookup) {
   const normalized = rows
     .map((row) => {
       const period = resolvePeriod(row);
       const finalScore = toNumber(row.finalScore || row["Final Score"]);
       if (!period || finalScore === null) return null;
 
-      const personKey = getPersonKey(row);
-      const employee = employeeMap.get(personKey) || null;
+      const identity = resolveRowIdentity(row);
+      const employee = findDirectoryMember(identity, directoryLookup);
+      const personKey = employee?.key || identity.personKey || identity.userId || identity.phone;
+      if (!personKey) return null;
       const statusLabel = normalizeText(row.status || row.Status || "", "");
 
       return {
@@ -529,14 +570,9 @@ function normalizeAttendanceRows(rows, employeeLookup) {
       const dateKey = getDateKey(row.date || row.Date || row.Tanggal || row.tanggal || row["Tanggal Input"]);
       if (!dateKey) return null;
 
-      const phone = normalizeText(row.phone || row["Nomer HP"] || row["Nomor HP"] || row.nomor_hp || "", "");
-      const userId = normalizeText(row.userId || row["User ID"] || row.user_id || "", "");
-      const employee =
-        employeeLookup.byKey.get(getPersonKey(row)) ||
-        (phone ? employeeLookup.byPhone.get(phone) : null) ||
-        (userId ? employeeLookup.byUserId.get(userId) : null) ||
-        null;
-      const resolvedUserId = normalizeText(userId || employee?.userId || "", "");
+      const identity = resolveRowIdentity(row);
+      const employee = findDirectoryMember(identity, employeeLookup);
+      const resolvedUserId = normalizeText(identity.userId || employee?.userId || "", "");
       if (!resolvedUserId) return null;
 
       const rawStatus = row.status || row.Status || row.Keterangan || row.keterangan || "";
@@ -575,59 +611,48 @@ function normalizeAttendanceRows(rows, employeeLookup) {
     .sort((left, right) => right.dateKey.localeCompare(left.dateKey) || left.name.localeCompare(right.name, "id-ID"));
 }
 
-function buildFallbackData() {
-  return {
-    company: {
-      name: "Darus Sakinah",
-      workbook: "HR Darus Sakinah",
-      subtitle: "Pantau performa, absensi, dan tindak lanjut karyawan secara ringkas",
-    },
-    generatedAt: new Date().toISOString(),
-    employeeMaster: [
-      { Nama: "Aulia Rahman", Divisi: "Operasional", "Sub Divisi": "Distribusi", Jabatan: "Supervisor Gudang", "Nomer HP": "6281111111111", Akses: "Karyawan", "Status Karyawan": "Aktif", "Jam Masuk": "07:00", "Jam Pulang": "16:00" },
-      { Nama: "Bima Saputra", Divisi: "Operasional", "Sub Divisi": "Distribusi", Jabatan: "Koordinator Shift", "Nomer HP": "6281222222222", Akses: "Karyawan", "Status Karyawan": "Aktif", "Jam Masuk": "07:00", "Jam Pulang": "16:00" },
-      { Nama: "Citra Mahesa", Divisi: "Marketing", "Sub Divisi": "Digital", Jabatan: "Lead Campaign", "Nomer HP": "6281333333333", Akses: "Karyawan", "Status Karyawan": "Aktif", "Jam Masuk": "08:00", "Jam Pulang": "17:00" },
-      { Nama: "Dinda Larasati", Divisi: "Marketing", "Sub Divisi": "Partnership", Jabatan: "Partnership Officer", "Nomer HP": "6281444444444", Akses: "Karyawan", "Status Karyawan": "Aktif", "Jam Masuk": "08:00", "Jam Pulang": "17:00" },
-      { Nama: "Eko Pranata", Divisi: "Keuangan", "Sub Divisi": "Reporting", Jabatan: "Finance Analyst", "Nomer HP": "6281555555555", Akses: "Karyawan", "Status Karyawan": "Aktif", "Jam Masuk": "08:00", "Jam Pulang": "17:00" },
-      { Nama: "Farah Nabila", Divisi: "Keuangan", "Sub Divisi": "Collection", Jabatan: "Collection Officer", "Nomer HP": "6281666666666", Akses: "Karyawan", "Status Karyawan": "Aktif", "Jam Masuk": "08:00", "Jam Pulang": "17:00" },
-      { Nama: "Guntur Wijaya", Divisi: "SDM", "Sub Divisi": "Recruitment", Jabatan: "Talent Officer", "Nomer HP": "6281777777777", Akses: "Karyawan", "Status Karyawan": "Aktif", "Jam Masuk": "08:00", "Jam Pulang": "17:00" },
-      { Nama: "Hana Putri", Divisi: "SDM", "Sub Divisi": "People Ops", Jabatan: "People Support", "Nomer HP": "6281888888888", Akses: "Karyawan", "Status Karyawan": "Aktif", "Jam Masuk": "08:00", "Jam Pulang": "17:00" },
-    ],
-    scoreRows: [
-      { Nama: "Aulia Rahman", Divisi: "Operasional", "Sub Divisi": "Distribusi", Jabatan: "Supervisor Gudang", "Nomer HP": "6281111111111", KPI: 90, OKR: 85, Behavior: 86, "Final Score": 87, Status: "Top Talent", Bulan: "Maret", Tahun: 2026 },
-      { Nama: "Bima Saputra", Divisi: "Operasional", "Sub Divisi": "Distribusi", Jabatan: "Koordinator Shift", "Nomer HP": "6281222222222", KPI: 75, OKR: 73, Behavior: 74, "Final Score": 74, Status: "Solid", Bulan: "Maret", Tahun: 2026 },
-      { Nama: "Citra Mahesa", Divisi: "Marketing", "Sub Divisi": "Digital", Jabatan: "Lead Campaign", "Nomer HP": "6281333333333", KPI: 87, OKR: 85, Behavior: 84, "Final Score": 85, Status: "Top Talent", Bulan: "Maret", Tahun: 2026 },
-      { Nama: "Dinda Larasati", Divisi: "Marketing", "Sub Divisi": "Partnership", Jabatan: "Partnership Officer", "Nomer HP": "6281444444444", KPI: 73, OKR: 71, Behavior: 72, "Final Score": 72, Status: "Solid", Bulan: "Maret", Tahun: 2026 },
-      { Nama: "Eko Pranata", Divisi: "Keuangan", "Sub Divisi": "Reporting", Jabatan: "Finance Analyst", "Nomer HP": "6281555555555", KPI: 82, OKR: 79, Behavior: 79, "Final Score": 80, Status: "Solid", Bulan: "Maret", Tahun: 2026 },
-      { Nama: "Farah Nabila", Divisi: "Keuangan", "Sub Divisi": "Collection", Jabatan: "Collection Officer", "Nomer HP": "6281666666666", KPI: 64, OKR: 63, Behavior: 62, "Final Score": 63, Status: "Warning", Bulan: "Maret", Tahun: 2026 },
-      { Nama: "Guntur Wijaya", Divisi: "SDM", "Sub Divisi": "Recruitment", Jabatan: "Talent Officer", "Nomer HP": "6281777777777", KPI: 71, OKR: 70, Behavior: 69, "Final Score": 70, Status: "Solid", Bulan: "Maret", Tahun: 2026 },
-      { Nama: "Hana Putri", Divisi: "SDM", "Sub Divisi": "People Ops", Jabatan: "People Support", "Nomer HP": "6281888888888", KPI: 56, OKR: 54, Behavior: 55, "Final Score": 55, Status: "Warning", Bulan: "Maret", Tahun: 2026 },
-      { Nama: "Aulia Rahman", Divisi: "Operasional", "Sub Divisi": "Distribusi", Jabatan: "Supervisor Gudang", "Nomer HP": "6281111111111", KPI: 92, OKR: 89, Behavior: 92, "Final Score": 91, Status: "Top Talent", Bulan: "April", Tahun: 2026 },
-      { Nama: "Bima Saputra", Divisi: "Operasional", "Sub Divisi": "Distribusi", Jabatan: "Koordinator Shift", "Nomer HP": "6281222222222", KPI: 76, OKR: 82, Behavior: 77, "Final Score": 78, Status: "Solid", Bulan: "April", Tahun: 2026 },
-      { Nama: "Citra Mahesa", Divisi: "Marketing", "Sub Divisi": "Digital", Jabatan: "Lead Campaign", "Nomer HP": "6281333333333", KPI: 90, OKR: 87, Behavior: 86, "Final Score": 88, Status: "Top Talent", Bulan: "April", Tahun: 2026 },
-      { Nama: "Dinda Larasati", Divisi: "Marketing", "Sub Divisi": "Partnership", Jabatan: "Partnership Officer", "Nomer HP": "6281444444444", KPI: 71, OKR: 66, Behavior: 70, "Final Score": 69, Status: "Warning", Bulan: "April", Tahun: 2026 },
-      { Nama: "Eko Pranata", Divisi: "Keuangan", "Sub Divisi": "Reporting", Jabatan: "Finance Analyst", "Nomer HP": "6281555555555", KPI: 86, OKR: 82, Behavior: 84, "Final Score": 84, Status: "Solid", Bulan: "April", Tahun: 2026 },
-      { Nama: "Farah Nabila", Divisi: "Keuangan", "Sub Divisi": "Collection", Jabatan: "Collection Officer", "Nomer HP": "6281666666666", KPI: 60, OKR: 54, Behavior: 61, "Final Score": 58, Status: "Warning", Bulan: "April", Tahun: 2026 },
-      { Nama: "Guntur Wijaya", Divisi: "SDM", "Sub Divisi": "Recruitment", Jabatan: "Talent Officer", "Nomer HP": "6281777777777", KPI: 70, OKR: 76, Behavior: 75, "Final Score": 74, Status: "Solid", Bulan: "April", Tahun: 2026 },
-      { Nama: "Hana Putri", Divisi: "SDM", "Sub Divisi": "People Ops", Jabatan: "People Support", "Nomer HP": "6281888888888", KPI: 49, OKR: 45, Behavior: 48, "Final Score": 47, Status: "Critical", Bulan: "April", Tahun: 2026 },
-    ],
-    attendanceRows: [
-      { Tanggal: "28/04/2026 06:53", Nama: "Aulia Rahman", Divisi: "Operasional", Jabatan: "Supervisor Gudang", "Scan Masuk": "06:53", "Scan Pulang": "17:06", Status: "Fingerprint | 2 scan" },
-      { Tanggal: "28/04/2026 07:19", Nama: "Bima Saputra", Divisi: "Operasional", Jabatan: "Koordinator Shift", "Scan Masuk": "07:19", "Scan Pulang": "17:11", Status: "Fingerprint | 2 scan" },
-      { Tanggal: "28/04/2026 06:58", Nama: "Citra Mahesa", Divisi: "Marketing", Jabatan: "Lead Campaign", "Scan Masuk": "06:58", "Scan Pulang": "17:24", Status: "Fingerprint | 2 scan" },
-      { Tanggal: "28/04/2026 07:05", Nama: "Dinda Larasati", Divisi: "Marketing", Jabatan: "Partnership Officer", "Scan Masuk": "07:05", "Scan Pulang": "16:31", Status: "Fingerprint | 2 scan" },
-      { Tanggal: "28/04/2026 00:00", Nama: "Eko Pranata", Divisi: "Keuangan", Jabatan: "Finance Analyst", "Scan Masuk": "-", "Scan Pulang": "-", Status: "WFH" },
-      { Tanggal: "27/04/2026 06:50", Nama: "Farah Nabila", Divisi: "Keuangan", Jabatan: "Collection Officer", "Scan Masuk": "06:50", "Scan Pulang": "17:09", Status: "Fingerprint | 2 scan" },
-      { Tanggal: "27/04/2026 07:26", Nama: "Guntur Wijaya", Divisi: "SDM", Jabatan: "Talent Officer", "Scan Masuk": "07:26", "Scan Pulang": "17:15", Status: "Fingerprint | 2 scan" },
-      { Tanggal: "27/04/2026 16:42", Nama: "Hana Putri", Divisi: "SDM", Jabatan: "People Support", "Scan Masuk": "16:42", "Scan Pulang": "-", Status: "Fingerprint | 1 scan" }
-    ]
-  };
-}
+async function fetchJson(url, options = {}) {
+  const retries = Number.isFinite(options.retries) ? options.retries : FETCH_RETRIES;
+  const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : FETCH_TIMEOUT_MS;
+  let lastError = null;
 
-async function fetchJson(url) {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) throw new Error(`Gagal mengambil data (${response.status})`);
-  return response.json();
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(url, {
+        cache: "no-store",
+        signal: controller.signal,
+        headers: {
+          Accept: "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        const error = new Error(`Gagal mengambil data (${response.status})`);
+        error.status = response.status;
+        throw error;
+      }
+
+      return response.json();
+    } catch (error) {
+      const normalizedError = error?.name === "AbortError"
+        ? new Error(`Timeout ${Math.round(timeoutMs / 1000)} detik`)
+        : error;
+      const statusCode = Number(normalizedError?.status || 0);
+      const isRetryable = !statusCode || statusCode >= 500 || statusCode === 429;
+      lastError = normalizedError;
+      if (attempt < retries && isRetryable) {
+        await wait(FETCH_RETRY_DELAY_MS * (attempt + 1));
+        continue;
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  throw lastError || new Error("Gagal mengambil data");
 }
 
 function showToast(message) {
@@ -640,27 +665,61 @@ function showToast(message) {
   }, 4000);
 }
 
+function renderSyncStatusState(label, meta, tone = "loading", title = "") {
+  const card = document.getElementById("syncCard");
+  const labelEl = document.getElementById("syncStatusLabel");
+  const metaEl = document.getElementById("syncStatusMeta");
+  if (!card || !labelEl || !metaEl) return;
+  card.className = `sync-card sync-card--${tone}`;
+  card.title = title || meta || label;
+  labelEl.textContent = label;
+  metaEl.textContent = meta;
+}
+
+function setRefreshButtonState(isLoading) {
+  const button = document.getElementById("refreshButton");
+  if (!button) return;
+  button.disabled = isLoading;
+  button.textContent = isLoading ? "Menyegarkan..." : "Refresh Data";
+}
+
 async function resolveRawData() {
+  const warnings = [];
+
   if (window.__DARUS_DASHBOARD_DATA__) {
-    return { payload: window.__DARUS_DASHBOARD_DATA__, source: "Injected via window.__DARUS_DASHBOARD_DATA__" };
+    return {
+      payload: window.__DARUS_DASHBOARD_DATA__,
+      source: "Injected via window.__DARUS_DASHBOARD_DATA__",
+      sourceType: "injected",
+      warnings,
+      fetchedAt: new Date().toISOString(),
+    };
   }
 
   if (CONFIG.apiUrl) {
     try {
       const payload = await fetchJson(CONFIG.apiUrl);
-      return { payload, source: `Webhook n8n: ${CONFIG.apiUrl}` };
+      return {
+        payload,
+        source: `Webhook n8n: ${CONFIG.apiUrl}`,
+        sourceType: "live",
+        warnings,
+        fetchedAt: new Date().toISOString(),
+      };
     } catch (error) {
-      showToast(`Webhook gagal diakses. Pakai fallback lokal. (${error.message})`);
+      warnings.push(`Webhook utama gagal diakses: ${error.message}`);
     }
   }
 
   if (CONFIG.employeeApiUrl && CONFIG.scoreApiUrl) {
     try {
+      let partialAttendance = false;
       const attendancePromise = CONFIG.attendanceApiUrl
         ? fetchJson(CONFIG.attendanceApiUrl).catch((error) => {
-            showToast(`Webhook absensi belum aktif atau gagal diakses. (${error.message})`);
-            return [];
-          })
+          partialAttendance = true;
+          warnings.push(`Webhook absensi gagal diakses: ${error.message}`);
+          return [];
+        })
         : Promise.resolve([]);
 
       const [employeeMaster, scoreRows, attendanceRows] = await Promise.all([
@@ -681,22 +740,32 @@ async function resolveRawData() {
           attendanceRows,
         },
         source: "Spreadsheet live via webhook n8n",
+        sourceType: partialAttendance ? "live-partial" : "live",
+        warnings,
+        partialAttendance,
+        fetchedAt: new Date().toISOString(),
       };
     } catch (error) {
-      showToast(`Endpoint n8n live gagal diakses. Pakai fallback lokal. (${error.message})`);
+      warnings.push(`Endpoint n8n live gagal diakses: ${error.message}`);
     }
   }
 
   if (CONFIG.dataPath) {
     try {
       const payload = await fetchJson(CONFIG.dataPath);
-      return { payload, source: `File lokal: ${CONFIG.dataPath}` };
+      return {
+        payload,
+        source: `File lokal: ${CONFIG.dataPath}`,
+        sourceType: "local",
+        warnings,
+        fetchedAt: new Date().toISOString(),
+      };
     } catch (error) {
-      showToast(`File data lokal tidak ditemukan. Pakai fallback demo. (${error.message})`);
+      warnings.push(`File data lokal tidak ditemukan: ${error.message}`);
     }
   }
 
-  return { payload: buildFallbackData(), source: "Built-in demo data" };
+  throw new Error(warnings.at(-1) || "Tidak ada sumber data yang tersedia");
 }
 
 function extractRawSections(payload) {
@@ -713,7 +782,7 @@ function extractRawSections(payload) {
   };
 }
 
-function normalizeDashboardData(payload, sourceLabel) {
+function normalizeDashboardData(payload, sourceLabel, syncState = {}) {
   const sections = extractRawSections(payload);
   const employeeRows = normalizeEmployeeRows(sections.employeeRows);
   const directoryRows = normalizeDirectoryRows(sections.employeeRows);
@@ -722,7 +791,7 @@ function normalizeDashboardData(payload, sourceLabel) {
     byPhone: new Map(directoryRows.filter((row) => row.phone).map((row) => [row.phone, row])),
     byUserId: new Map(directoryRows.filter((row) => row.userId).map((row) => [row.userId, row])),
   };
-  const scoreRows = normalizeScoreRows(sections.scoreRows, directoryLookup.byKey);
+  const scoreRows = normalizeScoreRows(sections.scoreRows, directoryLookup);
   const attendanceRows = normalizeAttendanceRows(sections.attendanceRows || [], directoryLookup);
   const periodMap = groupBy(scoreRows, (row) => row.periodKey);
   const periods = [...periodMap.entries()]
@@ -842,6 +911,12 @@ function normalizeDashboardData(payload, sourceLabel) {
     subtitle: normalizeText(sections.company.subtitle || "Pantau performa, absensi, dan tindak lanjut karyawan secara ringkas"),
     generatedAt: sections.generatedAt || new Date().toISOString(),
     sourceLabel,
+    sync: {
+      sourceType: syncState.sourceType || "runtime",
+      warnings: syncState.warnings || [],
+      partialAttendance: Boolean(syncState.partialAttendance),
+      fetchedAt: syncState.fetchedAt || new Date().toISOString(),
+    },
     currentPeriod,
     previousPeriod,
     currentRows,
@@ -862,6 +937,7 @@ function normalizeDashboardData(payload, sourceLabel) {
     trend,
     attendanceRows,
     attendanceDateOptions,
+    attendanceDivisionOptions: ["all", ...new Set(attendanceRows.map((row) => row.division).filter(Boolean))],
     latestAttendanceDate: attendanceDateOptions[0] || "",
     priorityNotes,
     divisionOptions: ["all", ...new Set(directoryRows.map((row) => row.division).filter(Boolean))],
@@ -1320,10 +1396,34 @@ function renderExplorerSummary(rows, searchValue, divisionValue, statusValue) {
   `).join("");
 }
 
+function populateAttendanceDivisionFilter(model) {
+  const select = document.getElementById("attendanceDivisionFilter");
+  if (!select) return;
+  const currentValue = select.value;
+  select.innerHTML = model.attendanceDivisionOptions
+    .map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value === "all" ? "Semua Divisi" : value)}</option>`)
+    .join("");
+  select.disabled = model.attendanceDivisionOptions.length <= 1;
+  select.value = model.attendanceDivisionOptions.includes(currentValue) ? currentValue : "all";
+}
+
 function getAttendanceRowsByDate(model = currentDashboardModel) {
   if (!model) return [];
   const selectedDate = document.getElementById("attendanceDateFilter").value || model.latestAttendanceDate;
+  if (!selectedDate) return [];
   return model.attendanceRows.filter((row) => row.dateKey === selectedDate);
+}
+
+function getFilteredAttendanceRows(model = currentDashboardModel) {
+  if (!model) return [];
+  const searchValue = normalizeKey(document.getElementById("attendanceSearchInput")?.value.trim() || "");
+  const divisionValue = document.getElementById("attendanceDivisionFilter")?.value || "all";
+  return getAttendanceRowsByDate(model).filter((row) => {
+    const matchesDivision = divisionValue === "all" || row.division === divisionValue;
+    const haystack = normalizeKey([row.name, row.division, row.subDivision, row.title, row.status].join(" "));
+    const matchesSearch = !searchValue || haystack.includes(searchValue);
+    return matchesDivision && matchesSearch;
+  });
 }
 
 function populateAttendanceDateFilter(model) {
@@ -1346,7 +1446,10 @@ function populateAttendanceDateFilter(model) {
 function renderAttendanceSection(model = currentDashboardModel) {
   if (!model) return;
 
-  const rows = getAttendanceRowsByDate(model);
+  const rows = getFilteredAttendanceRows(model);
+  const searchInputValue = document.getElementById("attendanceSearchInput")?.value.trim() || "";
+  const divisionValue = document.getElementById("attendanceDivisionFilter")?.value || "all";
+  const hasAttendanceFilters = Boolean(searchInputValue) || divisionValue !== "all";
   const counts = rows.reduce((result, row) => {
     result.total += 1;
     if (row.isOnTime) result.onTime += 1;
@@ -1387,7 +1490,7 @@ function renderAttendanceSection(model = currentDashboardModel) {
         <td data-label="Status"><span class="chip chip--${row.statusGroup}">${escapeHtml(row.status)}</span></td>
       </tr>
     `).join("")
-    : `<tr><td colspan="8"><div class="empty-state">Belum ada data absensi pada tanggal yang dipilih.</div></td></tr>`;
+    : `<tr><td colspan="8"><div class="empty-state">${hasAttendanceFilters ? "Tidak ada data absensi yang cocok dengan filter saat ini." : "Belum ada data absensi pada tanggal yang dipilih."}</div></td></tr>`;
 }
 
 function renderPeopleList(containerId, rows) {
@@ -1467,6 +1570,32 @@ function renderHero(model) {
   document.getElementById("heroTitle").innerHTML = `Kinerja Karyawan<br>${escapeHtml(model.companyName)}`;
   document.getElementById("heroDescription").textContent = `${model.subtitle}.`;
   document.getElementById("periodPill").textContent = `Periode aktif: ${model.currentPeriod?.label || "-"}`;
+  const syncLabel = {
+    injected: "Runtime terhubung",
+    live: "Live via n8n",
+    "live-partial": "Live parsial",
+    local: "Fallback lokal",
+    demo: "Mode demo",
+    runtime: "Runtime update",
+  }[model.sync.sourceType] || "Sumber tidak diketahui";
+  const syncTone = {
+    injected: "live",
+    live: "live",
+    "live-partial": "warning",
+    local: "fallback",
+    demo: "fallback",
+    runtime: "live",
+  }[model.sync.sourceType] || "loading";
+  const syncNote = model.sync.partialAttendance
+    ? "Absensi live belum lengkap"
+    : model.sync.warnings.length
+      ? "Mode cadangan aktif"
+      : "Dashboard siap dipakai";
+  const syncMeta = [
+    `Sinkron ${formatDateTimeLabel(model.sync.fetchedAt)}`,
+    syncNote,
+  ].filter(Boolean).join(" • ");
+  renderSyncStatusState(syncLabel, syncMeta || "Dashboard siap dipakai.", syncTone, model.sourceLabel);
 }
 
 function bindFilters(model) {
@@ -1475,8 +1604,13 @@ function bindFilters(model) {
     document.getElementById(id).addEventListener("input", () => renderEmployeeTable());
     document.getElementById(id).addEventListener("change", () => renderEmployeeTable());
   });
-  document.getElementById("attendanceDateFilter").addEventListener("change", () => renderAttendanceSection());
-  document.getElementById("refreshButton").addEventListener("click", () => window.location.reload());
+  ["attendanceDateFilter", "attendanceSearchInput", "attendanceDivisionFilter"].forEach((id) => {
+    document.getElementById(id).addEventListener("input", () => renderAttendanceSection());
+    document.getElementById(id).addEventListener("change", () => renderAttendanceSection());
+  });
+  document.getElementById("refreshButton").addEventListener("click", () => {
+    loadDashboard({ manual: true });
+  });
   document.getElementById("resetFiltersButton").addEventListener("click", () => {
     document.getElementById("searchInput").value = "";
     document.getElementById("divisionFilter").value = "all";
@@ -1491,6 +1625,7 @@ function renderDashboard(model) {
   renderHero(model);
   renderStats(model);
   populateAttendanceDateFilter(model);
+  populateAttendanceDivisionFilter(model);
   renderAttendanceSection(model);
   renderTrend(model);
   renderStatusBreakdown(model);
@@ -1503,20 +1638,50 @@ function renderDashboard(model) {
   bindFilters(model);
 }
 
-async function boot() {
+async function loadDashboard({ manual = false } = {}) {
+  const requestId = ++loadRequestId;
+  setRefreshButtonState(true);
+  if (!currentDashboardModel) {
+    renderSyncStatusState("Menyiapkan sinkronisasi...", "Menghubungkan dashboard ke sumber data.", "loading");
+  } else {
+    renderSyncStatusState("Sinkronisasi berjalan", "Mengambil data dashboard terbaru...", "loading");
+  }
+
   try {
-    const { payload, source } = await resolveRawData();
-    const model = normalizeDashboardData(payload, source);
+    const resolved = await resolveRawData();
+    if (requestId !== loadRequestId) return;
+    const model = normalizeDashboardData(resolved.payload, resolved.source, resolved);
     renderDashboard(model);
+    if (resolved.warnings?.length) {
+      showToast(resolved.warnings[resolved.warnings.length - 1]);
+    } else if (manual) {
+      showToast("Data dashboard berhasil diperbarui.");
+    }
     window.DarusDashboard = {
       render: (nextPayload, nextSource = "Injected runtime data") => {
-        renderDashboard(normalizeDashboardData(nextPayload, nextSource));
+        renderDashboard(normalizeDashboardData(nextPayload, nextSource, {
+          sourceType: "runtime",
+          fetchedAt: new Date().toISOString(),
+          warnings: [],
+        }));
       },
     };
   } catch (error) {
+    if (requestId !== loadRequestId) return;
     showToast(`Dashboard gagal dimuat: ${error.message}`);
-    document.getElementById("statsGrid").innerHTML = `<div class="empty-state">Terjadi kesalahan saat memuat dashboard.</div>`;
+    renderSyncStatusState("Sinkronisasi gagal", "Sumber data tidak merespons. Coba refresh lagi.", "fallback", error.message);
+    if (!currentDashboardModel) {
+      document.getElementById("statsGrid").innerHTML = `<div class="empty-state">Terjadi kesalahan saat memuat dashboard.</div>`;
+    }
+  } finally {
+    if (requestId === loadRequestId) {
+      setRefreshButtonState(false);
+    }
   }
+}
+
+async function boot() {
+  await loadDashboard();
 }
 
 boot();
