@@ -913,24 +913,147 @@ function renderTrend(model) {
         <line class="trend__axis-line" x1="${padding.left}" y1="${baselineY}" x2="${chartWidth - padding.right}" y2="${baselineY}"></line>
         <path class="trend__area" d="${areaPath}"></path>
         <path class="trend__line" d="${linePath}"></path>
-        ${points.map((point) => `
-          <g transform="translate(${point.x} ${point.y})">
+        ${points.map((point, index) => {
+          const previousPoint = points[index - 1] || null;
+          const deltaLabel = previousPoint
+            ? `${point.avgScore >= previousPoint.avgScore ? "Naik" : "Turun"} ${formatNumber(Math.abs(point.avgScore - previousPoint.avgScore))} poin dibanding ${previousPoint.shortLabel}`
+            : "Periode awal dalam grafik";
+          return `
+          <g class="trend__point-group" data-index="${index}" transform="translate(${point.x} ${point.y})" tabindex="0" role="button" aria-label="${escapeHtml(`${point.label}. Final score ${formatNumber(point.avgScore)}. ${formatNumber(point.scoredCount, 0)} karyawan terscore. ${deltaLabel}.`)}">
+            <line class="trend__guide" x1="0" y1="${padding.top - point.y}" x2="0" y2="${baselineY - point.y}"></line>
             <rect class="trend__score-pill" x="-28" y="-36" width="56" height="28" rx="14"></rect>
             <text class="trend__score-text" x="0" y="-17">${escapeHtml(formatNumber(point.avgScore))}</text>
             <circle class="trend__point" cx="0" cy="0" r="8"></circle>
+            <circle class="trend__target" cx="0" cy="0" r="24"></circle>
           </g>
-        `).join("")}
+        `;
+        }).join("")}
       </svg>
+      <div class="trend__tooltip" id="trendTooltip" aria-live="polite"></div>
     </div>
     <div class="trend__labels">
-      ${points.map((point) => `
-        <div class="trend__label">
+      ${points.map((point, index) => `
+        <button class="trend__label trend__label-button" type="button" data-index="${index}" aria-label="${escapeHtml(`Tampilkan detail ${point.label}`)}">
           <strong>${escapeHtml(point.shortLabel)}</strong>
           <span>${escapeHtml(formatNumber(point.scoredCount, 0))} orang</span>
-        </div>
+        </button>
       `).join("")}
     </div>
   `;
+
+  bindTrendInteractivity(trendChart, points, chartWidth, chartHeight);
+}
+
+function bindTrendInteractivity(trendChart, points, chartWidth, chartHeight) {
+  const frame = trendChart.querySelector(".trend__frame");
+  const tooltip = trendChart.querySelector(".trend__tooltip");
+  const pointGroups = [...trendChart.querySelectorAll(".trend__point-group")];
+  const labels = [...trendChart.querySelectorAll(".trend__label-button")];
+  if (!frame || !tooltip || !pointGroups.length) return;
+
+  let selectedIndex = Math.max(points.length - 1, 0);
+  let activeIndex = selectedIndex;
+
+  const getDeltaText = (index) => {
+    if (index === 0) return "Periode awal pada grafik";
+    const previous = points[index - 1];
+    const delta = points[index].avgScore - previous.avgScore;
+    if (Math.abs(delta) < 0.05) return `Stabil vs ${previous.shortLabel}`;
+    return `${delta >= 0 ? "+" : ""}${formatNumber(delta)} vs ${previous.shortLabel}`;
+  };
+
+  const renderTooltip = (index) => {
+    const point = points[index];
+    tooltip.innerHTML = `
+      <strong>${escapeHtml(point.label)}</strong>
+      <span>Final score ${escapeHtml(formatNumber(point.avgScore))}</span>
+      <span>${escapeHtml(formatNumber(point.scoredCount, 0))} karyawan terscore</span>
+      <span>${escapeHtml(getDeltaText(index))}</span>
+    `;
+  };
+
+  const positionTooltip = (index) => {
+    const point = points[index];
+    const frameRect = frame.getBoundingClientRect();
+    const x = (point.x / chartWidth) * frameRect.width;
+    const y = (point.y / chartHeight) * frameRect.height;
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const left = clamp(x, (tooltipRect.width / 2) + 18, frameRect.width - (tooltipRect.width / 2) - 18);
+    const top = clamp(y - 18, tooltipRect.height + 18, frameRect.height - 14);
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+  };
+
+  const activate = (index) => {
+    activeIndex = index;
+    pointGroups.forEach((group, groupIndex) => group.classList.toggle("is-active", groupIndex === index));
+    labels.forEach((label, labelIndex) => label.classList.toggle("is-active", labelIndex === index));
+    renderTooltip(index);
+    tooltip.classList.add("is-visible");
+    requestAnimationFrame(() => positionTooltip(index));
+  };
+
+  const commit = (index) => {
+    selectedIndex = index;
+    activate(index);
+  };
+
+  const restore = () => activate(selectedIndex);
+
+  const focusSiblingAt = (source, index) => {
+    if (source.classList.contains("trend__label-button")) {
+      labels[index]?.focus();
+      return;
+    }
+    pointGroups[index]?.focus();
+  };
+
+  const handleKeydown = (event, index) => {
+    let nextIndex = null;
+    if (event.key === "ArrowLeft" || event.key === "ArrowDown") nextIndex = Math.max(0, index - 1);
+    if (event.key === "ArrowRight" || event.key === "ArrowUp") nextIndex = Math.min(points.length - 1, index + 1);
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = points.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    commit(nextIndex);
+    focusSiblingAt(event.currentTarget, nextIndex);
+  };
+
+  pointGroups.forEach((group, index) => {
+    group.addEventListener("mouseenter", () => activate(index));
+    group.addEventListener("focus", () => activate(index));
+    group.addEventListener("click", () => commit(index));
+    group.addEventListener("keydown", (event) => handleKeydown(event, index));
+  });
+
+  labels.forEach((label, index) => {
+    label.addEventListener("mouseenter", () => activate(index));
+    label.addEventListener("focus", () => activate(index));
+    label.addEventListener("click", () => commit(index));
+    label.addEventListener("keydown", (event) => handleKeydown(event, index));
+  });
+
+  trendChart.onmouseleave = restore;
+  trendChart.onfocusout = () => {
+    window.setTimeout(() => {
+      if (!trendChart.contains(document.activeElement)) restore();
+    }, 0);
+  };
+
+  if (trendChart._trendResizeHandler) {
+    window.removeEventListener("resize", trendChart._trendResizeHandler);
+  }
+
+  const resizeHandler = () => {
+    if (tooltip.classList.contains("is-visible")) {
+      positionTooltip(activeIndex);
+    }
+  };
+  trendChart._trendResizeHandler = resizeHandler;
+  window.addEventListener("resize", resizeHandler);
+
+  commit(selectedIndex);
 }
 
 function renderStatusBreakdown(model) {
@@ -1046,19 +1169,19 @@ function renderAttendanceSection(model = currentDashboardModel) {
   document.getElementById("attendanceTableBody").innerHTML = rows.length
     ? rows.map((row, index) => `
       <tr>
-        <td>${index + 1}</td>
-        <td>
+        <td data-label="No">${index + 1}</td>
+        <td data-label="Nama">
           <div class="data-table__name">
             <strong>${escapeHtml(row.name)}</strong>
             <span class="data-table__sub">${escapeHtml(row.subDivision || row.division)}</span>
           </div>
         </td>
-        <td>${escapeHtml(row.division)}</td>
-        <td>${escapeHtml(row.subDivision || "-")}</td>
-        <td>${escapeHtml(row.title)}</td>
-        <td>${escapeHtml(row.scanIn)}</td>
-        <td>${escapeHtml(row.scanOut)}</td>
-        <td><span class="chip chip--${row.statusGroup}">${escapeHtml(row.status)}</span></td>
+        <td data-label="Divisi">${escapeHtml(row.division)}</td>
+        <td data-label="Sub Divisi">${escapeHtml(row.subDivision || "-")}</td>
+        <td data-label="Jabatan">${escapeHtml(row.title)}</td>
+        <td data-label="Scan Masuk">${escapeHtml(row.scanIn)}</td>
+        <td data-label="Scan Pulang">${escapeHtml(row.scanOut)}</td>
+        <td data-label="Status"><span class="chip chip--${row.statusGroup}">${escapeHtml(row.status)}</span></td>
       </tr>
     `).join("")
     : `<tr><td colspan="8"><div class="empty-state">Belum ada data absensi pada tanggal yang dipilih.</div></td></tr>`;
@@ -1109,21 +1232,21 @@ function renderEmployeeTable(model = currentDashboardModel) {
   document.getElementById("employeeTableBody").innerHTML = rows.length
     ? rows.map((row, index) => `
       <tr>
-        <td>${index + 1}</td>
-        <td>
+        <td data-label="Rank">${index + 1}</td>
+        <td data-label="Nama">
           <div class="data-table__name">
             <strong>${escapeHtml(row.name)}</strong>
             <span class="data-table__sub">${escapeHtml(row.subDivision || row.division)}</span>
           </div>
         </td>
-        <td>${escapeHtml(row.division)}</td>
-        <td>${escapeHtml(row.subDivision || "-")}</td>
-        <td>${escapeHtml(row.title)}</td>
-        <td><span class="score-pill">${escapeHtml(formatNumber(row.finalScore))}</span></td>
-        <td><span class="metric-pill metric-pill--kpi">${escapeHtml(formatNumber(row.kpi))}</span></td>
-        <td><span class="metric-pill metric-pill--okr">${escapeHtml(formatNumber(row.okr))}</span></td>
-        <td><span class="metric-pill metric-pill--behavior">${escapeHtml(formatNumber(row.behavior))}</span></td>
-        <td><span class="chip chip--${row.group}">${escapeHtml(labelForGroup(row.group))}</span></td>
+        <td data-label="Divisi">${escapeHtml(row.division)}</td>
+        <td data-label="Sub Divisi">${escapeHtml(row.subDivision || "-")}</td>
+        <td data-label="Jabatan">${escapeHtml(row.title)}</td>
+        <td data-label="Final Score"><span class="score-pill">${escapeHtml(formatNumber(row.finalScore))}</span></td>
+        <td data-label="KPI"><span class="metric-pill metric-pill--kpi">${escapeHtml(formatNumber(row.kpi))}</span></td>
+        <td data-label="OKR"><span class="metric-pill metric-pill--okr">${escapeHtml(formatNumber(row.okr))}</span></td>
+        <td data-label="Behavior"><span class="metric-pill metric-pill--behavior">${escapeHtml(formatNumber(row.behavior))}</span></td>
+        <td data-label="Status"><span class="chip chip--${row.group}">${escapeHtml(labelForGroup(row.group))}</span></td>
       </tr>
     `).join("")
     : `<tr><td colspan="10"><div class="empty-state">Tidak ada data yang cocok dengan filter saat ini.</div></td></tr>`;

@@ -43,6 +43,7 @@ html {
 body {
   margin: 0;
   min-height: 100vh;
+  overflow-x: hidden;
   color: var(--ink);
   font-family: "IBM Plex Sans", sans-serif;
   background:
@@ -339,6 +340,7 @@ body {
     linear-gradient(180deg, rgba(90, 91, 214, 0.05), rgba(90, 91, 214, 0.015)),
     linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(248, 245, 239, 0.86));
   overflow: hidden;
+  isolation: isolate;
 }
 
 .trend__svg {
@@ -376,16 +378,37 @@ body {
   stroke-linejoin: round;
 }
 
+.trend__point-group {
+  cursor: pointer;
+  outline: none;
+}
+
+.trend__guide {
+  stroke: rgba(90, 91, 214, 0.2);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 7;
+  opacity: 0;
+  transition: opacity 180ms ease;
+}
+
 .trend__point {
   fill: #ffffff;
   stroke: #5a5bd6;
   stroke-width: 4;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 180ms ease, fill 180ms ease, stroke-width 180ms ease;
+}
+
+.trend__target {
+  fill: transparent;
 }
 
 .trend__score-pill {
   fill: rgba(238, 240, 255, 0.96);
   stroke: rgba(90, 91, 214, 0.16);
   stroke-width: 1;
+  transition: transform 180ms ease, fill 180ms ease, stroke 180ms ease, opacity 180ms ease;
 }
 
 .trend__score-text {
@@ -394,6 +417,66 @@ body {
   font-size: 16px;
   font-weight: 700;
   text-anchor: middle;
+  transition: transform 180ms ease, fill 180ms ease;
+}
+
+.trend__point-group.is-active .trend__guide {
+  opacity: 1;
+}
+
+.trend__point-group.is-active .trend__point {
+  fill: #eef0ff;
+  stroke-width: 4.8;
+  transform: scale(1.12);
+}
+
+.trend__point-group.is-active .trend__score-pill {
+  fill: rgba(255, 255, 255, 0.98);
+  stroke: rgba(90, 91, 214, 0.28);
+  transform: translateY(-2px);
+}
+
+.trend__point-group:not(.is-active) .trend__score-pill,
+.trend__point-group:not(.is-active) .trend__score-text {
+  opacity: 0.82;
+}
+
+.trend__tooltip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: grid;
+  gap: 4px;
+  min-width: 188px;
+  max-width: 220px;
+  padding: 12px 14px;
+  border: 1px solid rgba(90, 91, 214, 0.16);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 18px 36px rgba(67, 60, 138, 0.16);
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, calc(-100% - 14px));
+  transition: opacity 180ms ease, visibility 180ms ease, transform 180ms ease;
+  z-index: 2;
+}
+
+.trend__tooltip.is-visible {
+  opacity: 1;
+  visibility: visible;
+}
+
+.trend__tooltip strong {
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 0.96rem;
+  color: var(--ink);
+}
+
+.trend__tooltip span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
 }
 
 .trend__labels {
@@ -405,8 +488,30 @@ body {
 
 .trend__label {
   min-width: 0;
-  padding: 0 6px;
+  padding: 12px 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 18px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   text-align: center;
+  cursor: pointer;
+  transition: transform 180ms ease, border-color 180ms ease, background-color 180ms ease;
+}
+
+.trend__label-button:hover,
+.trend__label-button.is-active,
+.trend__label-button:focus-visible {
+  border-color: rgba(90, 91, 214, 0.16);
+  background: rgba(90, 91, 214, 0.06);
+}
+
+.trend__label-button:hover {
+  transform: translateY(-1px);
+}
+
+.trend__label-button:focus-visible {
+  outline: none;
 }
 
 .trend__label strong {
@@ -622,6 +727,7 @@ body {
 .field input,
 .field select {
   width: 100%;
+  min-height: 48px;
   padding: 12px 14px;
   color: var(--ink);
   border: 1px solid rgba(23, 38, 29, 0.12);
@@ -640,6 +746,7 @@ body {
 .table-wrap {
   overflow-x: auto;
   margin-top: 20px;
+  -webkit-overflow-scrolling: touch;
 }
 
 .table-wrap--attendance {
@@ -875,12 +982,21 @@ body {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .content-grid--duo {
+    grid-template-columns: 1fr;
+  }
+
   .panel__header {
     flex-direction: column;
   }
 
   .panel__hint {
+    max-width: none;
     text-align: left;
+  }
+
+  .filters {
+    justify-content: flex-start;
   }
 
   .attendance-summary {
@@ -890,45 +1006,338 @@ body {
 
 @media (max-width: 760px) {
   .shell {
-    width: min(100% - 24px, 1380px);
+    width: min(100% - 16px, 1380px);
     padding-top: 20px;
   }
 
   .hero,
   .panel,
   .stat-card {
-    padding: 20px;
+    padding: 18px;
+  }
+
+  .hero {
+    gap: 18px;
+    text-align: center;
   }
 
   .hero h1 {
     max-width: 100%;
+    font-size: clamp(2.35rem, 11vw, 3.35rem);
+    line-height: 0.94;
   }
 
   .hero__brand {
     justify-content: center;
   }
 
+  .hero__logo {
+    width: min(100%, 170px);
+  }
+
+  .hero__copy {
+    justify-self: stretch;
+  }
+
+  .hero__meta {
+    width: 100%;
+    align-items: stretch;
+    justify-self: stretch;
+    gap: 10px;
+  }
+
+  .pill {
+    max-width: 100%;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .hero__meta .button {
+    width: 100%;
+    min-width: 0;
+  }
+
   .stats-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .content-grid--duo {
     grid-template-columns: 1fr;
   }
 
+  .panel__header {
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .panel__header--inline {
+    align-items: flex-start;
+  }
+
+  .panel__hint {
+    font-size: 0.9rem;
+  }
+
   .filters {
-    justify-content: stretch;
+    justify-content: flex-start;
+    width: 100%;
   }
 
   .field {
     min-width: 100%;
   }
 
+  .field--compact {
+    min-width: 100%;
+  }
+
+  .trend {
+    min-height: 360px;
+    padding-top: 4px;
+  }
+
+  .trend__frame {
+    min-height: 270px;
+    border-radius: 20px;
+  }
+
+  .trend__tooltip {
+    max-width: calc(100% - 24px);
+    min-width: 0;
+    padding: 10px 12px;
+  }
+
+  .trend__labels {
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .trend__label {
+    padding: 10px 4px 8px;
+  }
+
+  .status-row {
+    grid-template-columns: 96px 1fr auto;
+    gap: 10px;
+  }
+
+  .division-card__top,
+  .person-card__top {
+    align-items: flex-start;
+  }
+
   .attendance-summary {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .attendance-card:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .table-wrap {
+    overflow: visible;
+    margin-top: 16px;
+  }
+
+  .table-wrap--attendance {
+    margin-top: 14px;
+  }
+
+  .data-table,
+  .data-table tbody,
+  .data-table tr,
+  .data-table td {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .data-table {
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+
+  .data-table colgroup,
+  .data-table thead {
+    display: none;
+  }
+
+  .data-table tbody {
+    display: grid;
+    gap: 12px;
+  }
+
+  .data-table tbody tr {
+    padding: 14px 14px 10px;
+    border: 1px solid var(--panel-line);
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.82);
+    box-shadow: 0 12px 30px rgba(92, 67, 28, 0.08);
+  }
+
+  .data-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.82);
+  }
+
+  .data-table td {
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr);
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(23, 38, 29, 0.08);
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    text-align: left !important;
+  }
+
+  .data-table td:last-child {
+    padding-bottom: 0;
+    border-bottom: none;
+  }
+
+  .data-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .data-table td[colspan] {
+    display: block;
+    padding: 0;
+    border-bottom: none;
+  }
+
+  .data-table td[colspan]::before {
+    display: none;
+  }
+
+  .data-table__name {
+    gap: 2px;
+  }
+
+  .data-table__name strong {
+    font-size: 0.98rem;
+    line-height: 1.3;
+  }
+
+  .data-table td .chip,
+  .data-table td .score-pill,
+  .data-table td .metric-pill {
+    justify-self: start;
+  }
+
+  .data-table td[data-label="Status"] .chip {
+    max-width: 100%;
+  }
+
+  .score-pill,
+  .metric-pill {
+    min-width: 56px;
   }
 
   .table-foot {
     flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    text-align: center;
+  }
+
+  .table-foot {
+    justify-content: center;
+  }
+
+  .toast {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    max-width: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .shell {
+    width: min(100% - 12px, 1380px);
+    padding-top: 14px;
+    padding-bottom: 28px;
+  }
+
+  .hero,
+  .panel,
+  .stat-card {
+    padding: 16px;
+    border-radius: 20px;
+  }
+
+  .hero {
+    gap: 16px;
+  }
+
+  .hero h1 {
+    font-size: clamp(2rem, 12vw, 2.7rem);
+  }
+
+  .stats-grid,
+  .attendance-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .attendance-card:last-child {
+    grid-column: auto;
+  }
+
+  .trend {
+    min-height: 320px;
+  }
+
+  .trend__frame {
+    min-height: 240px;
+  }
+
+  .trend__label strong {
+    font-size: 0.88rem;
+  }
+
+  .trend__label span {
+    font-size: 0.76rem;
+  }
+
+  .status-row {
+    grid-template-columns: 1fr auto;
+    gap: 8px 12px;
+  }
+
+  .status-row__track {
+    grid-column: 1 / -1;
+  }
+
+  .division-card__top,
+  .person-card__top {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .division-card__score,
+  .person-card__score {
+    font-size: 1.35rem;
+  }
+
+  .data-table tbody tr {
+    padding: 12px 12px 8px;
+    border-radius: 18px;
+  }
+
+  .data-table td {
+    grid-template-columns: 82px minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .data-table td::before {
+    font-size: 0.74rem;
   }
 }
