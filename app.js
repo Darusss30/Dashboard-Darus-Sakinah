@@ -326,8 +326,8 @@ function resolveAttendanceInsight(rawStatus, scanIn, scanOut, scheduledIn = "", 
 
   if (parsedRaw.isAlpha) {
     return {
-      scanIn: effectiveScanIn || "-",
-      scanOut: effectiveScanOut || "-",
+      scanIn: "-",
+      scanOut: "-",
       status: "Alpa",
       statusGroup: "critical",
       isLate: false,
@@ -530,10 +530,11 @@ function normalizeAttendanceRows(rows, employeeLookup) {
       const resolvedUserId = normalizeText(userId || employee?.userId || "", "");
       if (!resolvedUserId) return null;
 
-      const rawScanIn = normalizeText(row["Scan Masuk"] || row.scan_masuk || row["Jam Masuk"] || row.jam_masuk || "", "-");
-      const rawScanOut = normalizeText(row["Scan Pulang"] || row.scan_pulang || row["Jam Pulang"] || row.jam_pulang || "", "-");
+      const rawStatus = row.status || row.Status || row.Keterangan || row.keterangan || "";
+      const rawScanIn = normalizeText(row["Scan Masuk"] || row.scan_masuk || "", "-");
+      const rawScanOut = normalizeText(row["Scan Pulang"] || row.scan_pulang || "", "-");
       const statusInsight = resolveAttendanceInsight(
-        row.status || row.Status || row.Keterangan || row.keterangan || "",
+        rawStatus,
         rawScanIn,
         rawScanOut,
         employee?.scheduleIn || "",
