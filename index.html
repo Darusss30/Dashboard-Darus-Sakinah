@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Dashboard kinerja karyawan Darus Sakinah berbasis HTML, CSS, dan JavaScript untuk data proyek n8n HR.">
+  <title>Dashboard Kinerja Karyawan | Darus Sakinah</title>
+  <link rel="icon" type="image/png" href="./logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="page-glow" aria-hidden="true"></div>
+  <div class="page-grid" aria-hidden="true"></div>
+
+  <main class="shell">
+    <header class="hero">
+      <div class="hero__brand">
+        <img src="./logo.png" alt="Logo Darus Sakinah" class="hero__logo">
+      </div>
+
+      <div class="hero__copy">
+        <h1 id="heroTitle">Kinerja Karyawan<br>Darus Sakinah</h1>
+        <p id="heroDescription" class="hero__description">
+          Dashboard ini membaca struktur data yang mengikuti workflow n8n HR Anda:
+          data karyawan aktif, final score bulanan, status performa, dan performa per divisi.
+        </p>
+      </div>
+
+      <div class="hero__meta">
+        <span class="pill pill--accent" id="periodPill">Memuat periode...</span>
+        <button class="button button--ghost" id="refreshButton" type="button">Refresh Data</button>
+      </div>
+    </header>
+
+    <section class="stats-grid" id="statsGrid" aria-label="Ringkasan utama"></section>
+
+    <section class="panel panel--attendance">
+      <div class="panel__header panel__header--inline">
+        <div>
+          <p class="panel__kicker">Absensi Karyawan</p>
+          <h2>Monitoring Absensi Harian</h2>
+        </div>
+
+        <div class="filters filters--compact">
+          <label class="field field--compact">
+            <span>Tanggal</span>
+            <select id="attendanceDateFilter"></select>
+          </label>
+        </div>
+      </div>
+
+      <div class="attendance-summary" id="attendanceSummary"></div>
+
+      <div class="table-wrap table-wrap--attendance">
+        <table class="data-table data-table--attendance">
+          <colgroup>
+            <col style="width: 80px">
+            <col style="width: 220px">
+            <col style="width: 150px">
+            <col style="width: 150px">
+            <col style="width: 190px">
+            <col style="width: 120px">
+            <col style="width: 120px">
+            <col style="width: 300px">
+          </colgroup>
+          <thead>
+            <tr>
+              <th>No</th>
+              <th>Nama</th>
+              <th>Divisi</th>
+              <th>Sub Divisi</th>
+              <th>Jabatan</th>
+              <th>Scan Masuk</th>
+              <th>Scan Pulang</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="attendanceTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="content-grid">
+      <article class="panel panel--wide panel--trend">
+        <div class="panel__header">
+          <div>
+            <p class="panel__kicker">Trend Bulanan</p>
+            <h2>Rata-rata Final Score</h2>
+          </div>
+          <p class="panel__hint">6 periode terakhir dari data Final Score Bulanan.</p>
+        </div>
+        <div class="trend" id="trendChart"></div>
+      </article>
+
+      <article class="panel">
+        <div class="panel__header">
+          <div>
+            <p class="panel__kicker">Status Pulse</p>
+            <h2>Sebaran Kinerja Saat Ini</h2>
+          </div>
+          <p class="panel__hint">Dihitung dari final score dan label status karyawan.</p>
+        </div>
+        <div id="statusBreakdown"></div>
+        <div class="signal-cards" id="signalCards"></div>
+      </article>
+    </section>
+
+    <section class="content-grid">
+      <article class="panel panel--wide">
+        <div class="panel__header">
+          <div>
+            <p class="panel__kicker">Leaderboard Divisi</p>
+            <h2>Performa Divisi</h2>
+          </div>
+          <p class="panel__hint">Skor rata-rata, coverage, dan performer teratas per divisi.</p>
+        </div>
+        <div class="division-board" id="divisionBoard"></div>
+      </article>
+
+      <article class="panel">
+        <div class="panel__header">
+          <div>
+            <p class="panel__kicker">Fokus Minggu Ini</p>
+            <h2>Prioritas Tindak Lanjut</h2>
+          </div>
+          <p class="panel__hint">Ringkasan cepat untuk CEO, admin, atau manager.</p>
+        </div>
+        <div class="priority-list" id="priorityList"></div>
+      </article>
+    </section>
+
+    <section class="content-grid content-grid--duo">
+      <article class="panel">
+        <div class="panel__header">
+          <div>
+            <p class="panel__kicker">Top Talent</p>
+            <h2>Performa Terbaik</h2>
+          </div>
+          <p class="panel__hint">Karyawan dengan skor tertinggi pada periode aktif.</p>
+        </div>
+        <div class="people-list" id="topTalentList"></div>
+      </article>
+
+      <article class="panel">
+        <div class="panel__header">
+          <div>
+            <p class="panel__kicker">Need Attention</p>
+            <h2>Area Risiko</h2>
+          </div>
+          <p class="panel__hint">Karyawan warning atau critical yang perlu follow-up.</p>
+        </div>
+        <div class="people-list" id="attentionList"></div>
+      </article>
+    </section>
+
+    <section class="panel panel--explorer">
+      <div class="panel__header panel__header--inline">
+        <div>
+          <p class="panel__kicker">Explorer</p>
+          <h2>Monitor Karyawan</h2>
+        </div>
+
+        <div class="filters">
+          <label class="field">
+            <span>Cari</span>
+            <input id="searchInput" type="search" placeholder="Nama, divisi, atau jabatan">
+          </label>
+
+          <label class="field">
+            <span>Divisi</span>
+            <select id="divisionFilter"></select>
+          </label>
+
+          <label class="field">
+            <span>Status</span>
+            <select id="statusFilter">
+              <option value="all">Semua</option>
+              <option value="top">Top Talent</option>
+              <option value="solid">Solid</option>
+              <option value="warning">Warning</option>
+              <option value="critical">Critical</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table data-table--employees">
+          <colgroup>
+            <col style="width: 7%">
+            <col style="width: 17%">
+            <col style="width: 10%">
+            <col style="width: 14%">
+            <col style="width: 14%">
+            <col style="width: 10%">
+            <col style="width: 10%">
+            <col style="width: 10%">
+            <col style="width: 10%">
+            <col style="width: 14%">
+          </colgroup>
+          <thead>
+            <tr>
+              <th>Rank</th>
+              <th>Nama</th>
+              <th>Divisi</th>
+              <th>Sub Divisi</th>
+              <th>Jabatan</th>
+              <th>Final Score</th>
+              <th>KPI</th>
+              <th>OKR</th>
+              <th>Behavior</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="employeeTableBody"></tbody>
+        </table>
+      </div>
+
+      <div class="table-foot">
+        <span id="employeeCounter">0 karyawan tampil</span>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="statusToast" hidden></div>
+
+  <script src="./config.js"></script>
+  <script src="./app.js" defer></script>
+</body>
+</html>
