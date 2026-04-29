@@ -216,6 +216,15 @@ function labelForGroup(group) {
   }[group] || "Solid";
 }
 
+function toneLabelForPriority(tone) {
+  return {
+    top: "Quick Win",
+    solid: "Monitoring",
+    warning: "Perlu Fokus",
+    critical: "Urgent",
+  }[tone] || "Monitoring";
+}
+
 function excelSerialToDateKey(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return "";
@@ -804,9 +813,27 @@ function normalizeDashboardData(payload, sourceLabel) {
       return left.name.localeCompare(right.name, "id-ID");
     });
   const priorityNotes = [
-    bestDivision ? { title: `Divisi terkuat: ${bestDivision.division}`, text: `Skor rata-rata ${formatNumber(bestDivision.avgScore)} dengan coverage ${formatPercent(bestDivision.coverage)} dan performer teratas ${bestDivision.topPerformer?.name || "-"}.` } : null,
-    lowestDivision ? { title: `Divisi prioritas: ${lowestDivision.division}`, text: `Skor rata-rata ${formatNumber(lowestDivision.avgScore)}. Fokuskan coaching, review target, dan monitoring mingguan pada divisi ini.` } : null,
-    { title: "Coverage scoring", text: `${currentRows.length} dari ${activeEmployeeCount} karyawan aktif sudah memiliki final score pada periode ${currentPeriod?.label || "-"}.` },
+    bestDivision ? {
+      tone: "top",
+      eyebrow: "Sorotan Positif",
+      title: "Divisi terkuat",
+      stat: bestDivision.division,
+      text: `Rata-rata ${formatNumber(bestDivision.avgScore)} dengan coverage ${formatPercent(bestDivision.coverage)}. Top performer saat ini ${bestDivision.topPerformer?.name || "-"}.`,
+    } : null,
+    lowestDivision ? {
+      tone: "warning",
+      eyebrow: "Intervensi",
+      title: "Divisi prioritas",
+      stat: lowestDivision.division,
+      text: `Rata-rata ${formatNumber(lowestDivision.avgScore)}. Prioritaskan coaching, review target, dan monitoring mingguan pada area ini.`,
+    } : null,
+    {
+      tone: coverage !== null && coverage >= 80 ? "solid" : "warning",
+      eyebrow: "Monitoring",
+      title: "Coverage scoring",
+      stat: `${formatNumber(currentRows.length, 0)}/${formatNumber(activeEmployeeCount, 0)}`,
+      text: `${currentRows.length} dari ${activeEmployeeCount} karyawan aktif sudah memiliki final score pada periode ${currentPeriod?.label || "-"}.`,
+    },
   ].filter(Boolean);
 
   return {
@@ -858,29 +885,62 @@ function renderStats(model) {
   `).join("");
 }
 
+function resolveTrendScale(values) {
+  const numericValues = values.map((value) => Number(value)).filter(Number.isFinite);
+  if (!numericValues.length) {
+    return { min: 0, max: 100, ticks: [0, 25, 50, 75, 100] };
+  }
+
+  const rawMin = Math.min(...numericValues);
+  const rawMax = Math.max(...numericValues);
+  const spread = rawMax - rawMin;
+  const buffer = spread < 4 ? 8 : spread < 10 ? 6 : 5;
+
+  let min = clamp(rawMin - buffer, 0, 100);
+  const max = 100;
+  if (max - min < 20) {
+    min = Math.max(0, max - 20);
+  }
+
+  const visibleRange = max - min;
+  const step = visibleRange <= 30 ? 5 : visibleRange <= 60 ? 10 : 20;
+  min = Math.floor(min / step) * step;
+
+  const ticks = [];
+  for (let value = min; value <= max + 0.001; value += step) {
+    ticks.push(Number(value.toFixed(1)));
+  }
+
+  return { min, max, ticks };
+}
+
 function renderTrend(model) {
   const trendChart = document.getElementById("trendChart");
-  trendChart.className = "trend";
+  trendChart.className = `trend${model.trend.length === 1 ? " trend--single" : ""}`;
   trendChart.style.setProperty("--trend-columns", String(Math.max(model.trend.length, 1)));
   if (!model.trend.length) {
     trendChart.innerHTML = `<div class="empty-state">Belum ada data trend bulanan.</div>`;
     return;
   }
 
-  const chartWidth = 1080;
+  const chartWidth = 1120;
   const chartHeight = 420;
-  const padding = { top: 54, right: 36, bottom: 30, left: 44 };
+  const padding = { top: 54, right: 58, bottom: 30, left: 58 };
   const plotWidth = chartWidth - padding.left - padding.right;
   const plotHeight = chartHeight - padding.top - padding.bottom;
   const baselineY = padding.top + plotHeight;
-  const maxScore = 100;
+  const scale = resolveTrendScale(model.trend.map((item) => item.avgScore));
+  const scoreRange = Math.max(scale.max - scale.min, 1);
   const stepX = model.trend.length === 1 ? 0 : plotWidth / (model.trend.length - 1);
+
   const points = model.trend.map((item, index) => {
     const x = model.trend.length === 1
       ? padding.left + (plotWidth / 2)
       : padding.left + (stepX * index);
-    const y = padding.top + ((maxScore - clamp(item.avgScore, 0, maxScore)) / maxScore) * plotHeight;
-    return { ...item, x, y };
+    const y = padding.top + ((scale.max - clamp(item.avgScore, scale.min, scale.max)) / scoreRange) * plotHeight;
+    const scoreLabel = formatNumber(item.avgScore);
+    const pillWidth = Math.max(54, 24 + (scoreLabel.length * 8));
+    return { ...item, x, y, scoreLabel, pillWidth };
   });
 
   const linePath = points
@@ -892,22 +952,43 @@ function renderTrend(model) {
     `L ${points[points.length - 1].x} ${baselineY}`,
     "Z",
   ].join(" ");
-  const gridValues = [0, 25, 50, 75, 100];
+  const gridValues = [...scale.ticks];
+  const latestPoint = points[points.length - 1];
+  const previousPoint = points[points.length - 2] || null;
+  const latestDelta = previousPoint ? latestPoint.avgScore - previousPoint.avgScore : null;
+  const summaryItems = [
+    { label: "Periode", value: latestPoint.label, meta: latestPoint.shortLabel },
+    { label: "Final score", value: latestPoint.scoreLabel, meta: `${formatNumber(latestPoint.scoredCount, 0)} karyawan terscore` },
+    {
+      label: "Perubahan",
+      value: latestDelta === null ? "Baseline" : `${latestDelta >= 0 ? "+" : ""}${formatNumber(latestDelta)}`,
+      meta: previousPoint ? `vs ${previousPoint.shortLabel}` : "Belum ada pembanding",
+    },
+  ];
 
   trendChart.innerHTML = `
+    <div class="trend__summary">
+      ${summaryItems.map((item) => `
+        <article class="trend__summary-card">
+          <span class="trend__summary-label">${escapeHtml(item.label)}</span>
+          <strong class="trend__summary-value">${escapeHtml(item.value)}</strong>
+          <small class="trend__summary-meta">${escapeHtml(item.meta)}</small>
+        </article>
+      `).join("")}
+    </div>
     <div class="trend__frame">
-      <svg class="trend__svg" viewBox="0 0 ${chartWidth} ${chartHeight}" preserveAspectRatio="none" role="img" aria-label="Grafik trend rata-rata final score">
+      <svg class="trend__svg" viewBox="0 0 ${chartWidth} ${chartHeight}" preserveAspectRatio="none" role="img" aria-label="Grafik trend rata-rata final score dengan skala fokus ${formatNumber(scale.min, 0)} sampai ${formatNumber(scale.max, 0)}">
         <defs>
           <linearGradient id="trend-area-fill" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stop-color="#5a5bd6" stop-opacity="0.28"></stop>
+            <stop offset="0%" stop-color="#5a5bd6" stop-opacity="0.24"></stop>
             <stop offset="100%" stop-color="#5a5bd6" stop-opacity="0.02"></stop>
           </linearGradient>
         </defs>
         ${gridValues.map((value) => {
-          const y = padding.top + ((maxScore - value) / maxScore) * plotHeight;
+          const y = padding.top + ((scale.max - value) / scoreRange) * plotHeight;
           return `
             <line class="trend__grid-line" x1="${padding.left}" y1="${y}" x2="${chartWidth - padding.right}" y2="${y}"></line>
-            <text class="trend__grid-label" x="${padding.left - 10}" y="${y + 4}" text-anchor="end">${value}</text>
+            <text class="trend__grid-label" x="${padding.left - 12}" y="${y + 4}" text-anchor="end">${escapeHtml(formatNumber(value, 0))}</text>
           `;
         }).join("")}
         <line class="trend__axis-line" x1="${padding.left}" y1="${baselineY}" x2="${chartWidth - padding.right}" y2="${baselineY}"></line>
@@ -919,12 +1000,12 @@ function renderTrend(model) {
             ? `${point.avgScore >= previousPoint.avgScore ? "Naik" : "Turun"} ${formatNumber(Math.abs(point.avgScore - previousPoint.avgScore))} poin dibanding ${previousPoint.shortLabel}`
             : "Periode awal dalam grafik";
           return `
-          <g class="trend__point-group" data-index="${index}" transform="translate(${point.x} ${point.y})" tabindex="0" role="button" aria-label="${escapeHtml(`${point.label}. Final score ${formatNumber(point.avgScore)}. ${formatNumber(point.scoredCount, 0)} karyawan terscore. ${deltaLabel}.`)}">
+          <g class="trend__point-group${points.length <= 2 ? " trend__point-group--pinned" : ""}" data-index="${index}" transform="translate(${point.x} ${point.y})" tabindex="0" role="button" aria-label="${escapeHtml(`${point.label}. Final score ${formatNumber(point.avgScore)}. ${formatNumber(point.scoredCount, 0)} karyawan terscore. ${deltaLabel}.`)}">
             <line class="trend__guide" x1="0" y1="${padding.top - point.y}" x2="0" y2="${baselineY - point.y}"></line>
-            <rect class="trend__score-pill" x="-28" y="-36" width="56" height="28" rx="14"></rect>
-            <text class="trend__score-text" x="0" y="-17">${escapeHtml(formatNumber(point.avgScore))}</text>
-            <circle class="trend__point" cx="0" cy="0" r="8"></circle>
-            <circle class="trend__target" cx="0" cy="0" r="24"></circle>
+            <rect class="trend__score-pill" x="${-(point.pillWidth / 2)}" y="-40" width="${point.pillWidth}" height="30" rx="15"></rect>
+            <text class="trend__score-text" x="0" y="-20">${escapeHtml(point.scoreLabel)}</text>
+            <ellipse class="trend__point" cx="0" cy="0" rx="8" ry="8"></ellipse>
+            <ellipse class="trend__target" cx="0" cy="0" rx="24" ry="24"></ellipse>
           </g>
         `;
         }).join("")}
@@ -946,13 +1027,25 @@ function renderTrend(model) {
 
 function bindTrendInteractivity(trendChart, points, chartWidth, chartHeight) {
   const frame = trendChart.querySelector(".trend__frame");
+  const svg = trendChart.querySelector(".trend__svg");
   const tooltip = trendChart.querySelector(".trend__tooltip");
   const pointGroups = [...trendChart.querySelectorAll(".trend__point-group")];
   const labels = [...trendChart.querySelectorAll(".trend__label-button")];
-  if (!frame || !tooltip || !pointGroups.length) return;
+  if (!frame || !svg || !tooltip || !pointGroups.length) return;
 
   let selectedIndex = Math.max(points.length - 1, 0);
-  let activeIndex = selectedIndex;
+  let activeIndex = null;
+
+  const applyState = () => {
+    pointGroups.forEach((group, groupIndex) => {
+      group.classList.toggle("is-active", groupIndex === activeIndex);
+      group.classList.toggle("is-selected", groupIndex === selectedIndex);
+    });
+    labels.forEach((label, labelIndex) => {
+      label.classList.toggle("is-active", labelIndex === activeIndex);
+      label.classList.toggle("is-selected", labelIndex === selectedIndex);
+    });
+  };
 
   const getDeltaText = (index) => {
     if (index === 0) return "Periode awal pada grafik";
@@ -972,33 +1065,81 @@ function bindTrendInteractivity(trendChart, points, chartWidth, chartHeight) {
     `;
   };
 
+  const applyPointGeometry = () => {
+    const svgRect = svg.getBoundingClientRect();
+    const scaleX = svgRect.width / chartWidth || 1;
+    const scaleY = svgRect.height / chartHeight || 1;
+    const ratio = scaleX > 0 ? scaleY / scaleX : 1;
+
+    pointGroups.forEach((group) => {
+      const point = group.querySelector(".trend__point");
+      const target = group.querySelector(".trend__target");
+      if (point) {
+        point.setAttribute("rx", String(8 * ratio));
+        point.setAttribute("ry", "8");
+      }
+      if (target) {
+        target.setAttribute("rx", String(24 * ratio));
+        target.setAttribute("ry", "24");
+      }
+    });
+  };
+
   const positionTooltip = (index) => {
     const point = points[index];
     const frameRect = frame.getBoundingClientRect();
     const x = (point.x / chartWidth) * frameRect.width;
     const y = (point.y / chartHeight) * frameRect.height;
     const tooltipRect = tooltip.getBoundingClientRect();
-    const left = clamp(x, (tooltipRect.width / 2) + 18, frameRect.width - (tooltipRect.width / 2) - 18);
-    const top = clamp(y - 18, tooltipRect.height + 18, frameRect.height - 14);
+    const normalizedX = x / Math.max(frameRect.width, 1);
+    const normalizedY = y / Math.max(frameRect.height, 1);
+    const preferredLeft = normalizedX < 0.28
+      ? x + 18
+      : normalizedX > 0.72
+        ? x - tooltipRect.width - 18
+        : x - (tooltipRect.width / 2);
+    const preferredTop = normalizedY < 0.24
+      ? y + 18
+      : y - tooltipRect.height - 18;
+    const left = clamp(preferredLeft, 12, frameRect.width - tooltipRect.width - 12);
+    const top = clamp(preferredTop, 12, frameRect.height - tooltipRect.height - 12);
     tooltip.style.left = `${left}px`;
     tooltip.style.top = `${top}px`;
+    tooltip.dataset.side = preferredTop > y ? "bottom" : "top";
   };
 
-  const activate = (index) => {
+  const hideTooltip = () => {
+    tooltip.classList.remove("is-visible");
+  };
+
+  const activate = (index, showTooltip = true) => {
     activeIndex = index;
-    pointGroups.forEach((group, groupIndex) => group.classList.toggle("is-active", groupIndex === index));
-    labels.forEach((label, labelIndex) => label.classList.toggle("is-active", labelIndex === index));
+    applyState();
+    if (!showTooltip) {
+      hideTooltip();
+      return;
+    }
     renderTooltip(index);
     tooltip.classList.add("is-visible");
     requestAnimationFrame(() => positionTooltip(index));
   };
 
-  const commit = (index) => {
+  const commit = (index, showTooltip = true) => {
     selectedIndex = index;
-    activate(index);
+    if (showTooltip) {
+      activate(index, true);
+      return;
+    }
+    activeIndex = null;
+    applyState();
+    hideTooltip();
   };
 
-  const restore = () => activate(selectedIndex);
+  const restore = () => {
+    activeIndex = null;
+    applyState();
+    hideTooltip();
+  };
 
   const focusSiblingAt = (source, index) => {
     if (source.classList.contains("trend__label-button")) {
@@ -1021,16 +1162,16 @@ function bindTrendInteractivity(trendChart, points, chartWidth, chartHeight) {
   };
 
   pointGroups.forEach((group, index) => {
-    group.addEventListener("mouseenter", () => activate(index));
-    group.addEventListener("focus", () => activate(index));
-    group.addEventListener("click", () => commit(index));
+    group.addEventListener("mouseenter", () => activate(index, true));
+    group.addEventListener("focus", () => activate(index, true));
+    group.addEventListener("click", () => commit(index, true));
     group.addEventListener("keydown", (event) => handleKeydown(event, index));
   });
 
   labels.forEach((label, index) => {
-    label.addEventListener("mouseenter", () => activate(index));
-    label.addEventListener("focus", () => activate(index));
-    label.addEventListener("click", () => commit(index));
+    label.addEventListener("mouseenter", () => activate(index, true));
+    label.addEventListener("focus", () => activate(index, true));
+    label.addEventListener("click", () => commit(index, true));
     label.addEventListener("keydown", (event) => handleKeydown(event, index));
   });
 
@@ -1046,14 +1187,16 @@ function bindTrendInteractivity(trendChart, points, chartWidth, chartHeight) {
   }
 
   const resizeHandler = () => {
-    if (tooltip.classList.contains("is-visible")) {
+    applyPointGeometry();
+    if (tooltip.classList.contains("is-visible") && activeIndex !== null) {
       positionTooltip(activeIndex);
     }
   };
   trendChart._trendResizeHandler = resizeHandler;
   window.addEventListener("resize", resizeHandler);
 
-  commit(selectedIndex);
+  applyPointGeometry();
+  commit(selectedIndex, false);
 }
 
 function renderStatusBreakdown(model) {
@@ -1065,38 +1208,70 @@ function renderStatusBreakdown(model) {
   ];
   const total = model.currentRows.length || 1;
   document.getElementById("statusBreakdown").innerHTML = `<div class="status-stack">${entries.map((entry) => `
-    <div class="status-row">
+    <div class="status-row status-row--${entry.key}">
       <span class="status-row__label">${escapeHtml(entry.label)}</span>
       <div class="status-row__track">
         <div class="status-row__bar bar--${entry.key}" style="width:${(model.statusCounts[entry.key] / total) * 100}%"></div>
       </div>
-      <span class="status-row__value">${escapeHtml(formatNumber(model.statusCounts[entry.key], 0))}</span>
+      <span class="status-row__value">
+        <strong>${escapeHtml(formatNumber(model.statusCounts[entry.key], 0))}</strong>
+        <small>${escapeHtml(formatPercent((model.statusCounts[entry.key] / total) * 100))}</small>
+      </span>
     </div>
   `).join("")}</div>`;
 
   document.getElementById("signalCards").innerHTML = [
-    { label: "Periode aktif", value: model.currentPeriod?.label || "-" },
-    { label: "Divisi terbaik", value: model.bestDivision?.division || "-" },
-    { label: "Area prioritas", value: model.lowestDivision?.division || "-" },
+    {
+      label: "Periode aktif",
+      value: model.currentPeriod?.label || "-",
+      meta: `${formatNumber(model.scoredCount, 0)} karyawan terscore`,
+      tone: "solid",
+    },
+    {
+      label: "Divisi terbaik",
+      value: model.bestDivision?.division || "-",
+      meta: model.bestDivision
+        ? `Avg ${formatNumber(model.bestDivision.avgScore)} • Coverage ${formatPercent(model.bestDivision.coverage)}`
+        : "Belum ada data",
+      tone: "top",
+    },
+    {
+      label: "Area prioritas",
+      value: model.lowestDivision?.division || "-",
+      meta: model.lowestDivision
+        ? `Avg ${formatNumber(model.lowestDivision.avgScore)} • Butuh coaching`
+        : "Belum ada data",
+      tone: "warning",
+    },
   ].map((card) => `
-    <div class="signal-card">
-      <span>${escapeHtml(card.label)}</span>
+    <div class="signal-card signal-card--${card.tone}">
+      <span class="signal-card__label">${escapeHtml(card.label)}</span>
       <strong>${escapeHtml(card.value)}</strong>
+      <small>${escapeHtml(card.meta)}</small>
     </div>
   `).join("");
 }
 
 function renderDivisionBoard(model) {
   document.getElementById("divisionBoard").innerHTML = model.divisions.length
-    ? model.divisions.map((division) => `
+    ? model.divisions.map((division, index) => `
       <article class="division-card">
         <div class="division-card__top">
-          <h3>${escapeHtml(division.division)}</h3>
+          <div class="division-card__heading">
+            <span class="division-card__rank">#${index + 1}</span>
+            <h3>${escapeHtml(division.division)}</h3>
+          </div>
           <span class="division-card__score">${escapeHtml(formatNumber(division.avgScore))}</span>
         </div>
+        <div class="division-card__progress" aria-hidden="true">
+          <span class="division-card__progress-fill" style="width:${clamp(division.coverage, 0, 100)}%"></span>
+        </div>
+        <div class="division-card__stats">
+          <span>Coverage ${escapeHtml(formatPercent(division.coverage))}</span>
+          <span>${escapeHtml(formatNumber(division.scoredCount, 0))}/${escapeHtml(formatNumber(division.activeCount, 0))} terscore</span>
+        </div>
         <p class="division-card__meta">
-          Coverage ${escapeHtml(formatPercent(division.coverage))} dari ${escapeHtml(formatNumber(division.activeCount, 0))} karyawan aktif.
-          <br>Top performer: ${escapeHtml(division.topPerformer?.name || "-")}.
+          Top performer: <strong>${escapeHtml(division.topPerformer?.name || "-")}</strong>
         </p>
         <div class="division-card__chips">
           <span class="chip chip--kpi">KPI ${escapeHtml(formatNumber(division.kpiAvg))}</span>
@@ -1110,10 +1285,38 @@ function renderDivisionBoard(model) {
 
 function renderPriority(model) {
   document.getElementById("priorityList").innerHTML = model.priorityNotes.map((item) => `
-    <article class="priority-item">
-      <h3>${escapeHtml(item.title)}</h3>
+    <article class="priority-item priority-item--${item.tone || "solid"}">
+      <div class="priority-item__top">
+        <div>
+          <span class="priority-item__eyebrow">${escapeHtml(item.eyebrow || "Monitoring")}</span>
+          <h3>${escapeHtml(item.title)}</h3>
+        </div>
+        <span class="chip chip--${item.tone || "solid"}">${escapeHtml(toneLabelForPriority(item.tone))}</span>
+      </div>
+      <strong class="priority-item__stat">${escapeHtml(item.stat || "-")}</strong>
       <p>${escapeHtml(item.text)}</p>
     </article>
+  `).join("");
+}
+
+function renderExplorerSummary(rows, searchValue, divisionValue, statusValue) {
+  const summaryItems = [
+    { text: `${formatNumber(rows.length, 0)} tampil`, tone: "solid" },
+    { text: `${formatNumber(rows.filter((row) => row.hasScore).length, 0)} terscore`, tone: "top" },
+  ];
+
+  if (divisionValue && divisionValue !== "all") {
+    summaryItems.push({ text: `Divisi: ${divisionValue}`, tone: "solid" });
+  }
+  if (statusValue && statusValue !== "all") {
+    summaryItems.push({ text: `Status: ${labelForGroup(statusValue)}`, tone: statusValue });
+  }
+  if (searchValue) {
+    summaryItems.push({ text: `Cari: "${searchValue}"`, tone: "warning" });
+  }
+
+  document.getElementById("explorerSummary").innerHTML = summaryItems.map((item) => `
+    <span class="summary-pill summary-pill--${item.tone}">${escapeHtml(item.text)}</span>
   `).join("");
 }
 
@@ -1217,7 +1420,8 @@ function populateDivisionFilter(model) {
 
 function renderEmployeeTable(model = currentDashboardModel) {
   if (!model) return;
-  const searchValue = normalizeKey(document.getElementById("searchInput").value);
+  const searchInputValue = document.getElementById("searchInput").value.trim();
+  const searchValue = normalizeKey(searchInputValue);
   const divisionValue = document.getElementById("divisionFilter").value;
   const statusValue = document.getElementById("statusFilter").value;
 
@@ -1251,6 +1455,11 @@ function renderEmployeeTable(model = currentDashboardModel) {
     `).join("")
     : `<tr><td colspan="10"><div class="empty-state">Tidak ada data yang cocok dengan filter saat ini.</div></td></tr>`;
 
+  renderExplorerSummary(rows, searchInputValue, divisionValue, statusValue);
+  const resetButton = document.getElementById("resetFiltersButton");
+  if (resetButton) {
+    resetButton.disabled = !searchInputValue && divisionValue === "all" && statusValue === "all";
+  }
   document.getElementById("employeeCounter").textContent = `${rows.length} karyawan tampil`;
 }
 
@@ -1268,6 +1477,12 @@ function bindFilters(model) {
   });
   document.getElementById("attendanceDateFilter").addEventListener("change", () => renderAttendanceSection());
   document.getElementById("refreshButton").addEventListener("click", () => window.location.reload());
+  document.getElementById("resetFiltersButton").addEventListener("click", () => {
+    document.getElementById("searchInput").value = "";
+    document.getElementById("divisionFilter").value = "all";
+    document.getElementById("statusFilter").value = "all";
+    renderEmployeeTable();
+  });
   filtersBound = true;
 }
 
